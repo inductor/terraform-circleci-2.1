@@ -1,0 +1,123 @@
+version: 2.1
+executors:
+  default:
+    working_directory: ~/project
+    docker:
+      - image: hashicorp/terraform:0.11.11
+commands:
+  restore_provider:
+    steps:
+      - restore_cache:
+          name: Restore providor dependencies
+          key: terraform-providor-{{ .Branch }}-{{ checksum "main.tf" }}
+  save_provider:
+    steps:
+      - save_cache:
+          name: Cache providor dependencies
+          key: terraform-providor-{{ .Branch }}-{{ checksum "main.tf" }}
+          paths:
+            - ~/project/.terraform
+  restore_state:
+    steps:
+      - restore_cache:
+          name: Restore providor dependencies
+          key: terraform-state-{{ .Branch }}-{{ checksum "main.tf" }}
+  save_state:
+    steps:
+      - save_cache:
+          name: Cache providor dependencies
+          key: terraform-state-{{ .Branch }}-{{ checksum "main.tf" }}
+          paths:
+            - ~/project/.terraform
+jobs:
+  plan:
+    parameters:
+      env:
+        type: enum
+        enum: ["stg", "prd"]
+    executor:
+      name: default
+    steps:
+      - checkout
+      - restore_provider
+      - run:
+          name: "export json credencital"
+          command: |
+            apk add --update --no-cache openssl && echo ${GCP_CREDENTIAL_<< parameters.env >>} | openssl base64 -d -A > ~/project/account.json
+      - run:
+          name: "terraform init"
+          command: |
+            terraform init -backend=true -backend-config="bucket=project-<< parameters.env >>-infra" -backend-config="project=project-<< parameters.env >>"
+      - save_provider
+      - save_state
+      - run:
+          name: "change workspace"
+          command: |
+            terraform workspace select << parameters.env >>
+      - run:
+          name: "check terraform format"
+          command: |
+            terraform plan -var-file=<< parameters.env >>.tfvars
+  apply:
+    parameters:
+      env:
+        type: enum
+        enum: ["stg", "prd"]
+    executor:
+      name: default
+    steps:
+      - checkout
+      - restore_provider
+      - restore_state
+      - run:
+          name: "export json credencital"
+          command: |
+            apk add --update --no-cache openssl && echo ${GCP_CREDENTIAL_<< parameters.env >>} | openssl base64 -d -A > ~/project/account.json
+      - run:
+          name: "change workspace"
+          command: |
+            terraform workspace select << parameters.env >>
+      - run:
+          name: "apply changes on terraform"
+          command: |
+            terraform apply -var-file=<< parameters.env >>.tfvars -auto-approve
+workflows:
+  plan_and_apply:
+    jobs:
+      - plan:
+          name: plan_stg
+          env: stg
+          filters:
+            branches:
+              only: master
+      - plan:
+          name: plan_prd
+          env: prd
+          filters:
+            branches:
+              only: release
+      - manual_check:
+          type: approval
+          filters:
+            branches:
+              only:
+                - release
+                - master
+      - apply:
+          requires:
+            - plan_stg
+            - manual_check
+          name: apply_stg
+          env: stg
+          filters:
+            branches:
+              only: master
+      - apply:
+          requires:
+            - plan_prd
+            - manual_check
+          name: apply_prd
+          env: prd
+          filters:
+            branches:
+              only: release
